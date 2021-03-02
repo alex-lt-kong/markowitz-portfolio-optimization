@@ -45,6 +45,7 @@ T <- nrow(X_log)  # number of days
 cat("N:", N, "T:", T, "\n")
 ```
 
+
 Take a look at the share price
 
 ```{r}
