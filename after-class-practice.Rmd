@@ -1,0 +1,219 @@
+---
+title: "After-Class Practice"
+author: "KONG Lingtong (Alex)"
+date: "2/25/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(portfolioBacktest)
+```
+# R session: Loading market data
+
+```{r}
+library(xts)  # to manipulate time series of stock data
+library(quantmod)  # to download stock data
+library(PerformanceAnalytics)  # to compute performance measures
+
+# download data from YahooFinance
+stock_namelist <- c("AMD", "ADI", "APD", "BA", "0001.HK", "DD", "M", "JNPR", "INTC", "GS", "IBM", "NOK", "XOM", "WFC")
+prices <- xts()
+for (i in 1:length(stock_namelist)) {
+  tmp <- Ad(getSymbols(stock_namelist[i], from = "2005-01-01", to = "2008-12-31", auto.assign = FALSE))
+  #tmp <- na.approx(tmp, na.rm = FALSE)  # interpolate NAs
+  tmp <- na.approx(tmp, na.rm = TRUE)  # interpolate NAs
+  prices <- cbind(prices, tmp)
+}
+colnames(prices) <- stock_namelist
+tclass(prices) <- "Date"
+
+head(prices)
+tail(prices)
+
+# compute log-returns and linear returns
+X_log <- diff(log(prices))[-1]
+X_lin <- (prices/lag(prices) - 1)[-1]
+# or alternatively...
+X_log <- CalculateReturns(prices, "log")[-1]
+X_lin <- CalculateReturns(prices)[-1]
+
+head(X_lin)
+
+N <- ncol(X_log)  # number of stocks
+T <- nrow(X_log)  # number of days
+cat("N:", N, "T:", T, "\n")
+```
+
+Take a look at the share price
+
+```{r}
+plot(prices/rep(prices[1, ], each = nrow(prices)), col = rainbow10equal, legend.loc = "topleft",
+     main = "Normalized prices")
+```
+
+Divide data into a training set and a test set
+
+```{r}
+T_trn <- round(0.7*T)  # 70% of data
+X_log_trn <- X_log[1:T_trn, ]
+X_log_tst <- X_log[(T_trn+1):T, ]
+X_lin_trn <- X_lin[1:T_trn, ]
+X_lin_tst <- X_lin[(T_trn+1):T, ]
+```
+
+Estimate mu and sigma with the training set
+```{r}
+#mu <- colMeans(X_log_trn)
+mu <- colMeans(X_log_trn, na.rm = TRUE)
+#Sigma <- cov(X_log_trn)
+Sigma <- cov(X_log_trn)
+mu
+Sigma
+```
+
+Buy & Hold Strategy
+```{r}
+# a B&H portfolio is trivially the zero vector with a one on the stock held
+w_BnH <- diag(N)
+rownames(w_BnH) <- colnames(X_lin)
+colnames(w_BnH) <- paste0("B&H-", colnames(X_lin))
+dim(w_BnH)
+dim(X_lin)
+w_BnH
+
+
+# compute returns of all B&H portfolios
+ret_BnH <- xts(X_lin %*% w_BnH, index(X_lin))
+ret_BnH_trn <- ret_BnH[1:T_trn, ]
+ret_BnH_tst <- ret_BnH[-c(1:T_trn), ]
+head(ret_BnH)
+tail(ret_BnH, n = 10)
+
+# performance measures
+t(table.AnnualizedReturns(ret_BnH_trn))
+t(table.AnnualizedReturns(ret_BnH_tst))
+
+table.DownsideRisk(ret_BnH_trn)
+```
+
+To compute the wealth or cumulative P&L, we have two options: one assumes the
+same quantity is repeateadly invested, whereas the other assumes
+reinvesting (compounding):
+
+```{r}
+# compute cumulative wealth
+dim(ret_BnH_trn)
+wealth_arith_BnH_trn <- 1 + cumsum(ret_BnH_trn)  # initial budget of 1$
+wealth_geom_BnH_trn <- cumprod(1 + ret_BnH_trn)  # initial budget of 1$
+
+# plots
+# same as: 
+#   plot(wealth_arith_BnH_trn[, 1], main = "Buy & Hold performance (not compounded)", ylab = "wealth")
+chart.CumReturns(ret_BnH_trn[, 1], main = "Buy & Hold performance (not compounded)", 
+                 geometric = FALSE, wealth.index = TRUE)
+
+# same as: 
+#   plot(wealth_geom_BnH_trn[, 1], main = "Buy & Hold performance (compounded)", ylab = "wealth")
+chart.CumReturns(ret_BnH_trn[, 1], main = "Buy & Hold performance (compounded)", 
+                 geometric = TRUE, wealth.index = TRUE)
+
+# more plots
+chart.CumReturns(ret_BnH, main = "Buy & Hold performance", 
+                 wealth.index = TRUE, legend.loc = "topleft", colorset = rich10equal)
+
+charts.PerformanceSummary(ret_BnH_trn, main = "Buy & Hold performance", 
+                          wealth.index = TRUE, colorset = rich10equal)
+
+chart.Boxplot(ret_BnH_trn)
+
+chart.RiskReturnScatter(ret_BnH_trn, symbolset = 21, bg = "red")
+```
+
+# Comparison of $\frac{1}{N}$ portfolio, quintile portfolio, and GMRP
+
+The EWP or $\frac{1}{N}$ portfolio allocates equal dollar weight to each stock: 
+**w**$=\frac{1}{N}$__1__.
+
+```{r}
+w_EWP <- rep(1/N, N)
+names(w_EWP) <- colnames(X_lin)
+w_EWP
+```
+
+__Quintile portfolios__ are widely used by practitioners. The idea is to 1) rank the N stocks, 2) divide them into five parts, and 3) long the top part (and possibly short the bottom part). One can rank the stocks in a multitude of ways (typically based on expensive factors that investment funds buy at a premium price). For our experiments, we will consider three possible rankings according to:
+
+1. $\mu$
+2. $\frac{\mu}{diag(\Sigma)}$
+3. $\frac{\mu}{diag(\sqrt{\Sigma})}$
+
+```{r}
+# find indices of sorted stocks
+i1 <- sort(mu, decreasing = TRUE, index.return = TRUE)$ix
+i2 <- sort(mu/diag(Sigma), decreasing = TRUE, index.return = TRUE)$ix
+i3 <- sort(mu/sqrt(diag(Sigma)), decreasing = TRUE, index.return = TRUE)$ix
+mu
+i1
+
+# create portfolios
+w_QuintP_1 <- w_QuintP_2 <- w_QuintP_3 <- rep(0, N)
+w_QuintP_1[i1[1:round(N/5)]] <- 1/round(N/5)
+w_QuintP_2[i2[1:round(N/5)]] <- 1/round(N/5)
+w_QuintP_3[i3[1:round(N/5)]] <- 1/round(N/5)
+w_QuintP <- cbind("QuintP (mu)"        = w_QuintP_1, 
+                  "QuintP (mu/sigma2)" = w_QuintP_2, 
+                  "QuintP (mu/sigma)"  = w_QuintP_3)
+rownames(w_QuintP) <- colnames(X_lin)
+w_QuintP
+```
+
+The __global maximum return portfolio (GMRP)__ chooses the stock with the hightest return during the in-sample period:
+
+```{r}
+i_max <- which.max(mu)
+w_GMRP <- rep(0, N)
+w_GMRP[i_max] <- 1
+names(w_GMRP) <- colnames(X_lin)
+w_GMRP
+```
+
+We can now compare the allocations of the portfolios:
+```{r}
+# put together all portfolios
+w_heuristic <- cbind("EWP" = w_EWP, w_QuintP, "GMRP" = w_GMRP)
+round(w_heuristic, digits = 2)
+
+barplot(t(w_heuristic), col = rainbow8equal[1:5], 
+        legend = colnames(w_heuristic), beside = TRUE,
+        main = "Portfolio allocation of heuristic portfolios", 
+        xlab = "stocks", ylab = "dollars")
+```
+
+Then we can compare the performance (in-sample vs out-of-sample):
+
+```{r}
+# compute returns of all portfolios
+ret_heuristic <- xts(X_lin %*% w_heuristic, index(X_lin))
+ret_heuristic$`QuintP (mu/sigma2)` <- NULL  # remove since it coincides with "QuintP (mu/sigma)"
+ret_heuristic_trn <- ret_heuristic[1:T_trn, ]
+ret_heuristic_tst <- ret_heuristic[-c(1:T_trn), ]
+
+# performance
+t(table.AnnualizedReturns(ret_heuristic_trn))
+t(table.AnnualizedReturns(ret_heuristic_tst))
+```
+
+Let’s plot the wealth evolution (cumulative PnL) over time:
+
+```{r}
+{ chart.CumReturns(ret_heuristic, main = "Cumulative return of heuristic portfolios", 
+                   wealth.index = TRUE, legend.loc = "topleft", colorset = rich8equal)
+  addEventLines(xts("training", index(X_lin[T_trn])), srt=90, pos=2, lwd = 2, col = "darkblue") }
+```
+
+Finally, we can plot the risk-return scatter plot:
+
+```{r}
+chart.RiskReturnScatter(ret_heuristic_trn, symbolset = 21, bg = "red",
+                        main = "Annualized Return and Risk (in-sample)")
+```
