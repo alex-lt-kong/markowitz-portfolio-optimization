@@ -15,14 +15,15 @@ library(portfolioBacktest)
 library(xts)  # to manipulate time series of stock data
 library(quantmod)  # to download stock data
 library(PerformanceAnalytics)  # to compute performance measures
+library(CVXR)
 
 # download data from YahooFinance
-stock_namelist <- c("AMD", "ADI", "APD", "BA", "0001.HK", "DD", "M", "JNPR", "INTC", "GS", "IBM", "NOK", "XOM", "WFC")
+stock_namelist <- c("AMD", "ADI", "APD", "BA", "DD", "M", "JNPR", "INTC", "GS", "IBM", "NOK", "XOM", "WFC")
 prices <- xts()
 for (i in 1:length(stock_namelist)) {
   tmp <- Ad(getSymbols(stock_namelist[i], from = "2005-01-01", to = "2008-12-31", auto.assign = FALSE))
-  #tmp <- na.approx(tmp, na.rm = FALSE)  # interpolate NAs
-  tmp <- na.approx(tmp, na.rm = TRUE)  # interpolate NAs
+  tmp <- na.approx(tmp, na.rm = FALSE)  # interpolate NAs
+ # tmp <- na.approx(tmp, na.rm = TRUE)  # interpolate NAs
   prices <- cbind(prices, tmp)
 }
 colnames(prices) <- stock_namelist
@@ -155,6 +156,8 @@ i2 <- sort(mu/diag(Sigma), decreasing = TRUE, index.return = TRUE)$ix
 i3 <- sort(mu/sqrt(diag(Sigma)), decreasing = TRUE, index.return = TRUE)$ix
 mu
 i1
+i2
+i3
 
 # create portfolios
 w_QuintP_1 <- w_QuintP_2 <- w_QuintP_3 <- rep(0, N)
@@ -195,7 +198,7 @@ Then we can compare the performance (in-sample vs out-of-sample):
 ```{r}
 # compute returns of all portfolios
 ret_heuristic <- xts(X_lin %*% w_heuristic, index(X_lin))
-ret_heuristic$`QuintP (mu/sigma2)` <- NULL  # remove since it coincides with "QuintP (mu/sigma)"
+#ret_heuristic$`QuintP (mu/sigma2)` <- NULL  # remove since it coincides with "QuintP (mu/sigma)"
 ret_heuristic_trn <- ret_heuristic[1:T_trn, ]
 ret_heuristic_tst <- ret_heuristic[-c(1:T_trn), ]
 
@@ -207,14 +210,63 @@ t(table.AnnualizedReturns(ret_heuristic_tst))
 Let’s plot the wealth evolution (cumulative PnL) over time:
 
 ```{r}
-{ chart.CumReturns(ret_heuristic, main = "Cumulative return of heuristic portfolios", 
-                   wealth.index = TRUE, legend.loc = "topleft", colorset = rich8equal)
-  addEventLines(xts("training", index(X_lin[T_trn])), srt=90, pos=2, lwd = 2, col = "darkblue") }
+chart.CumReturns(R = ret_heuristic, main = "Cumulative return of heuristic portfolios", 
+                 wealth.index = TRUE, legend.loc = "topleft", colorset = rich8equal)
+addEventLines(xts("training", index(X_lin[T_trn])), srt = 90, pos = 2,
+              lwd = 2, col = "darkblue")
 ```
 
 Finally, we can plot the risk-return scatter plot:
 
 ```{r}
-chart.RiskReturnScatter(ret_heuristic_trn, symbolset = 21, bg = "red",
+chart.RiskReturnScatter(R = ret_heuristic_trn, symbolset = 21, bg = "red",
                         main = "Annualized Return and Risk (in-sample)")
 ```
+# Markowitz's mean-variance portfolio (1952)
+
+Markowitz's mean-variance portfolio (MVP) with no shorting is formulated as:
+$$
+\underset{w}{maximize}\ \  \mu^T w- \lambda w^T \Sigma w \\
+\text{subject to  } 1^T w = 1 \\
+w \ge 0
+$$
+This problem does not have a closed-form solution so we use a solver.
+```{r}
+# create function for MVP
+MVP <- function(mu, Sigma, lmd = 0.5) {
+  w <- Variable(nrow(Sigma))
+  prob <- Problem(Maximize(t(mu) %*% w - lmd*quad_form(w, Sigma)),
+                  constraints = list(w >= 0, sum(w) == 1))
+  result <- solve(prob)
+  w <- as.vector(result$getValue(w))
+  names(w) <- colnames(Sigma)
+  return(w)
+}
+
+# this function can now be used as
+w_MVP <- MVP(mu, Sigma, lmd = 2)
+w_MVP
+
+w_heuristic <- cbind("EWP" = w_EWP, w_QuintP, "GMRP" = w_GMRP, "MVP" = w_MVP)
+round(w_heuristic, digits = 2)
+barplot(t(w_heuristic), col = rainbow8equal[1:6], 
+        legend = colnames(w_heuristic), beside = TRUE,
+        main = "Portfolio allocation of heuristic portfolios", 
+        xlab = "stocks", ylab = "dollars")
+```
+
+# Maximum Shapre ratio portfolio (MSRP)
+
+* Markowitz’s mean-variance framework provides portfolios along the Pareto-optimal
+frontier and the choice depends on the risk-aversion of the investor.
+
+* But typically one measures an investment with the Sharpe ratio: only one
+portfolio on the Pareto-optimal frontier achieves the maximum Sharpe ratio.
+
+* Precisely, Sharpe (1966) first proposed the maximization of the Sharpe ratio:
+
+$$
+\underset{w}{maximize}\ \  \frac{w^T \mu - r_f}{\sqrt{w^T \Sigma w}} \\
+\text{subject to  } 1^T w = 1 \\
+w \ge 0
+$$
