@@ -1,6 +1,6 @@
 ---
 title: "After-Class Practice"
-author: "KONG Lingtong (Alex)"
+author: "Alex Kong"
 date: "2/25/2021"
 output: html_document
 ---
