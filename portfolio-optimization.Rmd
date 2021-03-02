@@ -11,17 +11,25 @@ library(portfolioBacktest)
 ```
 # R session: Loading market data
 
+loading some stock data from three different sectors:
+* sector technology: AAPL, AMD, ADI.
+* sector healthcare: ABBV, AEZS, A.
+* sector basic materials: APD, AA, CF.
+
 ```{r}
 library(xts)  # to manipulate time series of stock data
 library(quantmod)  # to download stock data
 library(PerformanceAnalytics)  # to compute performance measures
 library(CVXR)
+#library(nloptr)
 
 # download data from YahooFinance
-stock_namelist <- c("AMD", "ADI", "APD", "BA", "DD", "M", "JNPR", "INTC", "GS", "IBM", "NOK", "XOM", "WFC")
+#stock_namelist <- c("AMD", "ADI", "APD", "BA", "DD", "M", "JNPR", "INTC", "GS", "IBM", "NOK", "XOM", "WFC")
+
+stock_namelist <- c("AAPL", "AMD", "ADI", "ABBV", "AEZS", "A", "APD", "AA", "CF")
 prices <- xts()
 for (i in 1:length(stock_namelist)) {
-  tmp <- Ad(getSymbols(stock_namelist[i], from = "2005-01-01", to = "2008-12-31", auto.assign = FALSE))
+  tmp <- Ad(getSymbols(stock_namelist[i], from = "2013-01-01", to = "2016-12-31", auto.assign = FALSE))
   tmp <- na.approx(tmp, na.rm = FALSE)  # interpolate NAs
  # tmp <- na.approx(tmp, na.rm = TRUE)  # interpolate NAs
   prices <- cbind(prices, tmp)
@@ -198,7 +206,7 @@ Then we can compare the performance (in-sample vs out-of-sample):
 ```{r}
 # compute returns of all portfolios
 ret_heuristic <- xts(X_lin %*% w_heuristic, index(X_lin))
-#ret_heuristic$`QuintP (mu/sigma2)` <- NULL  # remove since it coincides with "QuintP (mu/sigma)"
+ret_heuristic$`QuintP (mu/sigma2)` <- NULL  # remove since it coincides with "QuintP (mu/sigma)"
 ret_heuristic_trn <- ret_heuristic[1:T_trn, ]
 ret_heuristic_tst <- ret_heuristic[-c(1:T_trn), ]
 
@@ -270,3 +278,66 @@ $$
 \text{subject to  } 1^T w = 1 \\
 w \ge 0
 $$
+where $r_f$ is the return of a risk-free asset.
+
+* The tricky part is that, this problem is not convex. It belongs to the class of
+**fractional programming (FP)**.
+
+# Maximum Sharpe ratio portfolio via bisection
+
+We are going to solve the non-convex problem
+$$
+\underset{w,t}{maximize}\ \ t\\
+\text{subject to  } t \le \frac{w^T \mu}{\sqrt{w^T \Sigma w}} \\
+1^Tw = 1, (w \ge 0)
+$$
+via bisection on t with the following (convex) SOCP problem for a given t:
+$$
+\text{find } w \\
+\text{subject to  }\ t\lvert\lvert \Sigma^\frac{1}{2}w\rvert\rvert_2 \le w^T \mu \\
+q^T w = 1, (w \ge 0)
+$$
+
+```{r}
+# define the inner solver based on an SOCP solver 
+# (we will simply use CVXR for convenience, see: https://cvxr.rbind.io/cvxr_functions/)
+library(CVXR)
+
+# square-root of matrix Sigma
+Sigma_12 <- chol(Sigma)
+max(abs(t(Sigma_12) %*% Sigma_12 - Sigma))  # sanity check
+
+# create function for MVP
+SOCP_bisection <- function(t) {
+  w <- Variable(nrow(Sigma))
+  prob <- Problem(Maximize(0),
+                  constraints = list(t*cvxr_norm(Sigma_12 %*% w, 2) <= t(mu) %*% w,
+                                     sum(w) == 1,
+                                     w >= 0))
+  result <- solve(prob)
+  return(list("status" = result$status, "w" = as.vector(result$getValue(w))))
+}
+
+# now run the bisection algorithm
+t_lb <- 0   # for sure the problem is feasible in this case
+t_ub <- 10  # a tighter upper bound could be chosen, but a Sharpe ratio of 10 surely cannot be achieved
+while(t_ub - t_lb > 1e-6) {
+  t <- (t_ub + t_lb)/2  # midpoint
+  if(SOCP_bisection(t)$status == "infeasible")
+    t_ub <- t
+  else
+    t_lb <- t
+}
+w_bisection <- SOCP_bisection(t_lb)$w
+
+# comparison between two solutions
+round(w_bisection, digits = 3)
+
+# Sharpe ratio of two solutions
+#c("nonlinear_solver" = fn_SR(w_nonlinear_solver), 
+fn_SR <- function(w) {
+  return(as.numeric(t(w) %*% mu / sqrt(t(w) %*% Sigma %*% w)))
+}
+
+fn_SR(w_bisection)
+```
